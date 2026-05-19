@@ -1,0 +1,10 @@
+.env
+.runtime/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+TAPD*/

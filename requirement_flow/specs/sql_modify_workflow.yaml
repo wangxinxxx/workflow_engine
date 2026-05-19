@@ -1,0 +1,60 @@
+workflow_type: sql_modify
+
+stages:
+  - id: requirement
+    label: 需求确认与理解
+    nodes:
+      - requirement_confirm
+
+  - id: execution
+    label: 执行阶段
+    nodes:
+      - task_confirm
+      - fetch_and_confirm_changes
+      - local_edit_draft
+      - validate_result
+
+  - id: delivery
+    label: 交付
+    nodes:
+      - deliver
+
+nodes:
+  - id: requirement_confirm
+    label: 需求确认
+    actions: [approve, edit, rerun_with_input]
+    output: requirement_confirmed_file
+
+  - id: task_confirm
+    label: 确认任务
+    actions: [approve, edit, rerun_with_input]
+    output: task_file
+
+  - id: fetch_and_confirm_changes
+    label: 拉取代码并确认改动项
+    actions: [approve, edit, rerun_with_input]
+    output:
+      - source_script_info
+      - local_sql_path
+      - change_confirm_file
+
+  - id: local_edit_draft
+    label: 本地编辑并保存草稿
+    actions: [approve, edit, rerun_with_input]
+    output:
+      - modified_sql_path
+      - edit_summary_file
+
+  - id: validate_result
+    label: 校验结果
+    actions: [approve, edit, rerun_with_input]
+    output:
+      - self_test_report_path
+      - validation_summary_file
+
+  - id: deliver
+    label: 交付
+    actions: [approve, edit, rerun_with_input]
+    output:
+      - delivery_summary_file
+      - final_status

@@ -1,0 +1,28 @@
+workflow_type: sql_modify
+
+workflow_meta:
+  thread_id: "Workflow instance id"
+  requirement_name: "Requirement title"
+  tapd_id: "Primary TAPD id"
+
+runtime:
+  current_node: "Current node id"
+  status: "Overall workflow status"
+  node_statuses: "Per-node status map"
+
+artifacts:
+  requirement_confirmed_file: "Confirmed requirement file path"
+  task_file: "Confirmed task file path"
+  source_script_info:
+    task_name: "Source task name"
+    task_id: "Source task id"
+    script_path: "Source script path"
+    source_type: "sql_task | local_sql | platform_sql"
+  local_sql_path: "Pulled local SQL path"
+  modified_sql_path: "Modified local SQL path"
+  self_test_report_path: "Self-test report path"
+  delivery_summary_file: "Delivery summary path"
+
+notes:
+  - "Keep large content in files, not state."
+  - "State should mainly store ids, statuses, paths, and compact structured references."
