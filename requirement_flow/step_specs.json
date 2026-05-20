@@ -2,7 +2,7 @@
   {
     "id": "requirement_confirm",
     "label": "需求确认",
-    "target_file": "docs/开发文档.md",
+    "target_file": "docs/需求文档.md",
     "review_required": true,
     "instructions": "确认需求背景、目标、范围和约束，支持人工补充后重跑。"
   },
@@ -11,7 +11,7 @@
     "label": "确认任务",
     "target_file": "docs/开发文档.md",
     "review_required": true,
-    "instructions": "生成最终任务清单，支持人工编辑或补充约束后重跑。"
+    "instructions": "基于需求文档更新开发文档，明确执行任务、改动对象和待确认约束。"
   },
   {
     "id": "fetch_and_confirm_changes",

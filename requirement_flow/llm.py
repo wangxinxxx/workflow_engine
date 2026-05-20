@@ -47,8 +47,12 @@ def _load_env_file() -> None:
         os.environ.setdefault(key, _strip_quotes(value))
 
 
-def build_llm() -> Any:
+def ensure_env_loaded() -> None:
     _load_env_file()
+
+
+def build_llm() -> Any:
+    ensure_env_loaded()
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required to run the requirement flow.")

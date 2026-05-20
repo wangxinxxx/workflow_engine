@@ -28,6 +28,20 @@ def _node_inputs_block(state: RequirementState, node_id: str) -> str:
     return "\n".join(f"- {item}" for item in notes if str(item).strip()) or "-"
 
 
+def _external_contexts_block(state: RequirementState) -> str:
+    contexts = state.get("external_contexts", {}) or {}
+    if not contexts:
+        return "-"
+    sections: List[str] = []
+    for key in sorted(contexts.keys()):
+        value = str(contexts.get(key, "") or "").strip()
+        if not value:
+            continue
+        sections.append(f"### {key}")
+        sections.append(value)
+    return "\n\n".join(sections).strip() or "-"
+
+
 def _skill_context_block(node_def: Dict[str, object]) -> str:
     preferred = list(node_def.get("preferred_skills", []) or [])
     if not preferred:
@@ -64,6 +78,7 @@ def build_node_prompt(state: RequirementState, node_def: Dict[str, object]) -> s
         f"输出文件：`{artifact_key or '-'} `",
         f"需求名：{state.get('requirement_name', '') or state.get('title', '') or '-'}",
         f"主TAPD：{state.get('tapd_id', '') or '-'}",
+        f"TAPD链接：{state.get('tapd_url', '') or '-'}",
         "",
         "请根据下面上下文为当前节点生成结果。",
         "如果节点对应的是文档或文本产物，请直接输出完整内容。",
@@ -71,9 +86,11 @@ def build_node_prompt(state: RequirementState, node_def: Dict[str, object]) -> s
         "",
         _block("节点说明", str(node_def.get("instructions", "") or "-")),
         _block("原始需求", str(state.get("brief", "") or "-")),
+        _block("外部执行器上下文", _external_contexts_block(state)),
         _block("当前节点补充输入", _node_inputs_block(state, str(node_def["id"]))),
         _block("当前节点可用 Skill", _skill_context_block(node_def)),
         _block("当前 README.md", str(artifacts.get("README.md", "") or "-")),
+        _block("当前 docs/需求文档.md", str(artifacts.get("docs/需求文档.md", "") or "-")),
         _block("当前 docs/开发文档.md", str(artifacts.get("docs/开发文档.md", "") or "-")),
         _block("当前 online_sql/source.sql", str(artifacts.get("online_sql/source.sql", "") or "-")),
         _block("当前 draft_sql/modified.sql", str(artifacts.get("draft_sql/modified.sql", "") or "-")),

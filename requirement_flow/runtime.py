@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import TEMPLATE_DIR, THREADS_DIR, resolve_requirement_dir
+from .debug_trace import log_event
 from .file_store import (
     read_requirement_files,
     render_requirement_readme,
@@ -15,8 +16,18 @@ from .file_store import (
     write_requirement_files,
 )
 from .graph import build_requirement_graph
+from .node_executors import normalize_tapd_reference
+from .schemas import clean_string_list, dedupe_list_preserve_order
 from .skill_registry import match_preferred_skills
+from .tracing import graph_run_config
 from .workflow_defs import SQL_MODIFY_WORKFLOW_ID, get_workflow_definition
+
+
+def _debug_breakpoint(label: str) -> None:
+    if str(os.getenv("REQUIREMENT_FLOW_DEBUG_BREAKPOINTS", "") or "").strip() != "1":
+        return
+    print(f"[debug-breakpoint] {label}")
+    breakpoint()
 
 
 def thread_state_path(thread_id: str) -> Path:
@@ -42,14 +53,54 @@ def _allowed_artifact_keys(workflow_type: str) -> set[str]:
     return keys
 
 
+def _rewrite_requirement_doc_title(content: str) -> str:
+    text = str(content or "")
+    if text.startswith("# 开发文档"):
+        return "# 需求文档" + text[len("# 开发文档") :]
+    return text
+
+
+def _read_artifacts_from_disk(requirement_dir: Path) -> Dict[str, str]:
+    return read_requirement_files(requirement_dir, [])
+
+
+def _artifact_path_map(requirement_dir: Path, artifact_keys: List[str]) -> Dict[str, str]:
+    return {key: str((requirement_dir / key).resolve()) for key in artifact_keys}
+
+
+def _is_artifact_path_map(requirement_dir: Path, artifacts: Dict[str, str]) -> bool:
+    if not artifacts:
+        return False
+    for key, value in artifacts.items():
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        if candidate != str((requirement_dir / key).resolve()):
+            return False
+    return True
+
+
 def _migrate_artifacts(state: Dict[str, Any]) -> Dict[str, str]:
     workflow_type = str(state.get("workflow_type", SQL_MODIFY_WORKFLOW_ID) or SQL_MODIFY_WORKFLOW_ID)
     allowed = _allowed_artifact_keys(workflow_type)
     raw_artifacts = dict(state.get("artifacts", {}) or {})
 
+    requirement_doc = str(raw_artifacts.get("docs/需求文档.md", "") or "").strip()
     dev_doc = str(raw_artifacts.get("docs/开发文档.md", "") or "").strip()
     old_summary = str(raw_artifacts.get("00_summary.md", "") or "").strip()
     old_tasks = str(raw_artifacts.get("03_tasks.md", "") or "").strip()
+    if not requirement_doc and dev_doc:
+        rewritten = _rewrite_requirement_doc_title(dev_doc)
+        raw_artifacts["docs/需求文档.md"] = rewritten + ("\n" if not rewritten.endswith("\n") else "")
+        requirement_doc = rewritten
+    if not requirement_doc and (old_summary or old_tasks):
+        sections = ["# 需求文档"]
+        if old_summary:
+            sections.extend(["", "## 历史需求确认迁移", "", old_summary])
+        if old_tasks:
+            sections.extend(["", "## 历史任务清单迁移", "", old_tasks])
+        raw_artifacts["docs/需求文档.md"] = "\n".join(sections).strip() + "\n"
+
     if not dev_doc and (old_summary or old_tasks):
         sections = ["# 开发文档"]
         if old_summary:
@@ -78,7 +129,12 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
     normalized["workflow_type"] = str(normalized.get("workflow_type", SQL_MODIFY_WORKFLOW_ID) or SQL_MODIFY_WORKFLOW_ID)
     normalized["requirement_name"] = str(normalized.get("requirement_name", "") or normalized.get("title", "") or "")
     normalized["tapd_id"] = str(normalized.get("tapd_id", "") or "")
-    normalized["node_inputs"] = dict(normalized.get("node_inputs", {}) or {})
+    normalized["tapd_url"] = str(normalized.get("tapd_url", "") or "")
+    normalized["external_contexts"] = dict(normalized.get("external_contexts", {}) or {})
+    normalized["node_inputs"] = {
+        str(key): dedupe_list_preserve_order(clean_string_list(value))
+        for key, value in dict(normalized.get("node_inputs", {}) or {}).items()
+    }
     normalized["node_statuses"] = dict(normalized.get("node_statuses", {}) or {})
     if not normalized["node_statuses"]:
         normalized["node_statuses"] = {
@@ -103,7 +159,17 @@ def _normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
             normalized.get("self_test_report_path", "") or requirement_path / "自测报告.md"
         )
     normalized["source_script_info"] = dict(normalized.get("source_script_info", {}) or {})
-    normalized["artifacts"] = _migrate_artifacts(normalized)
+    migrated_artifacts = _migrate_artifacts(normalized)
+    normalized["artifacts"] = migrated_artifacts
+    if requirement_dir and _is_artifact_path_map(Path(requirement_dir), migrated_artifacts):
+        disk_artifacts = _read_artifacts_from_disk(Path(requirement_dir))
+        merged_artifacts = dict(disk_artifacts)
+        for key, value in migrated_artifacts.items():
+            current = str(merged_artifacts.get(key, "") or "").strip()
+            candidate = str(value or "")
+            if not current and candidate and not Path(candidate).is_absolute():
+                merged_artifacts[key] = candidate
+        normalized["artifacts"] = merged_artifacts
     normalized["current_step"] = str(normalized.get("current_step", "") or normalized.get("current_node", "") or "created")
     normalized["status"] = str(normalized.get("status", "") or "created")
     valid_steps = {"created", "load_context", "done"} | {
@@ -260,14 +326,60 @@ def _snapshot_graph_state(graph: Any, config: Dict[str, Any], fallback: Dict[str
     return fallback
 
 
+def _apply_interrupt_content_to_artifacts(snapshot: Dict[str, Any], interrupt_payload: Optional[object]) -> Dict[str, Any]:
+    if not isinstance(interrupt_payload, dict):
+        return snapshot
+    if str(interrupt_payload.get("type", "") or "").strip() != "node_review":
+        return snapshot
+    step_id = str(interrupt_payload.get("step_id", "") or "").strip()
+    content = str(interrupt_payload.get("content", "") or "")
+    if not step_id or not content.strip():
+        return snapshot
+
+    workflow_type = str(snapshot.get("workflow_type", SQL_MODIFY_WORKFLOW_ID) or SQL_MODIFY_WORKFLOW_ID)
+    artifact_key = ""
+    for node in get_workflow_definition(workflow_type)["nodes"]:
+        if str(node.get("id", "") or "") == step_id:
+            artifact_key = str(node.get("artifact_key", "") or "").strip()
+            break
+    if not artifact_key:
+        return snapshot
+
+    updated = dict(snapshot)
+    artifacts = dict(updated.get("artifacts", {}) or {})
+    artifacts[artifact_key] = content
+    updated["artifacts"] = artifacts
+    return updated
+
+
 def _write_runtime_outputs(thread_id: str, snapshot: Dict[str, Any], interrupt_payload: Optional[object]) -> None:
+    _debug_breakpoint("runtime.before_write_runtime_outputs")
     snapshot = _normalize_state(snapshot)
+    snapshot = _apply_interrupt_content_to_artifacts(snapshot, interrupt_payload)
     _persist_requirement_views(snapshot)
+    persisted_snapshot = dict(snapshot)
+    raw_requirement_dir = str(snapshot.get("requirement_dir", "") or "").strip()
+    if raw_requirement_dir:
+        persisted_snapshot["artifacts"] = _artifact_path_map(
+            Path(raw_requirement_dir),
+            sorted((snapshot.get("artifacts", {}) or {}).keys()),
+        )
     thread_runtime_dir(thread_id).mkdir(parents=True, exist_ok=True)
-    thread_state_path(thread_id).write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    thread_state_path(thread_id).write_text(json.dumps(persisted_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     thread_interrupt_path(thread_id).write_text(
         json.dumps(interrupt_payload or {}, ensure_ascii=False, indent=2),
         encoding="utf-8",
+    )
+    log_event(
+        thread_id,
+        "runtime_outputs_written",
+        {
+            "status": snapshot.get("status"),
+            "current_step": snapshot.get("current_step"),
+            "interrupted": bool(interrupt_payload),
+            "snapshot": persisted_snapshot,
+            "interrupt_payload": interrupt_payload or {},
+        },
     )
 
 
@@ -324,16 +436,44 @@ def _select_interrupt_resume_payload(graph: Any, config: Dict[str, Any], thread_
 
 
 def resume_thread(thread_id: str, payload: object) -> Dict[str, Any]:
-    _assert_resume_ready(thread_id)
+    current_state = _assert_resume_ready(thread_id)
     graph = build_requirement_graph()
-    config = {"configurable": {"thread_id": thread_id}}
+    config = graph_run_config(current_state, operation="resume_thread")
     from langgraph.types import Command
 
     resume_payload = _select_interrupt_resume_payload(graph, config, thread_id, payload)
-    result = graph.invoke(Command(resume=resume_payload), config=config)
+    log_event(
+        thread_id,
+        "resume_start",
+        {
+            "payload_type": type(payload).__name__,
+            "current_step": current_state.get("current_step", ""),
+            "payload": payload,
+        },
+    )
+    try:
+        result = graph.invoke(Command(resume=resume_payload), config=config)
+    except Exception as exc:
+        log_event(
+            thread_id,
+            "resume_error",
+            {
+                "error": str(exc),
+            },
+        )
+        raise
     interrupt_payload = _extract_interrupt_payload(result)
     snapshot = _snapshot_graph_state(graph, config, result)
     _write_runtime_outputs(thread_id, snapshot, interrupt_payload)
+    log_event(
+        thread_id,
+        "resume_ok",
+        {
+            "status": snapshot.get("status", ""),
+            "current_step": snapshot.get("current_step", ""),
+            "interrupted": bool(interrupt_payload),
+        },
+    )
     return {
         "state": snapshot,
         "interrupt": interrupt_payload or {},
@@ -341,12 +481,25 @@ def resume_thread(thread_id: str, payload: object) -> Dict[str, Any]:
 
 
 def rerun_step(thread_id: str, step_id: str, note: str) -> Dict[str, Any]:
+    # BREAKPOINT HERE:
+    # requirement_confirm 正式入口。从这里开始看 state、node_inputs、artifacts 的初始值。
     graph = build_requirement_graph()
     config = {"configurable": {"thread_id": thread_id}}
     snapshot = graph.get_state(config)
     state = _normalize_state(copy.deepcopy(snapshot.values))
     if not state:
         raise ValueError(f"Thread not found: {thread_id}")
+    log_event(
+        thread_id,
+        "rerun_step_start",
+        {
+            "step_id": step_id,
+            "note_len": len(note or ""),
+            "current_step": state.get("current_step", ""),
+            "note": note,
+        },
+    )
+    config = graph_run_config(state, operation="rerun_step")
 
     workflow_type = str(state.get("workflow_type", SQL_MODIFY_WORKFLOW_ID) or SQL_MODIFY_WORKFLOW_ID)
     node_ids = _workflow_node_ids(workflow_type)
@@ -374,18 +527,19 @@ def rerun_step(thread_id: str, step_id: str, note: str) -> Dict[str, Any]:
             "note": note if downstream_id == step_id else "",
         }
         artifact_key = artifact_keys_by_node.get(downstream_id, "")
-        if artifact_key and artifact_key != "docs/开发文档.md":
+        if artifact_key and artifact_key != "docs/需求文档.md":
             artifacts[artifact_key] = ""
 
-    existing_inputs = list(node_inputs.get(step_id, []) or [])
+    existing_inputs = [str(item).strip() for item in node_inputs.get(step_id, []) or [] if str(item).strip()]
     if note.strip():
         existing_inputs.append(note.strip())
-    node_inputs[step_id] = existing_inputs
+    cleaned_inputs = dedupe_list_preserve_order(existing_inputs)
+    node_inputs[step_id] = cleaned_inputs
 
     updated_state = {
         **state,
         "node_statuses": node_statuses,
-        "node_inputs": node_inputs,
+        "node_inputs": {step_id: cleaned_inputs},
         "artifacts": artifacts,
         "current_step": step_id,
         "status": "running",
@@ -393,10 +547,31 @@ def rerun_step(thread_id: str, step_id: str, note: str) -> Dict[str, Any]:
     }
 
     new_config = graph.update_state(config, updated_state, as_node=predecessor)
-    result = graph.invoke(None, config=new_config)
+    try:
+        result = graph.invoke(None, config=new_config)
+    except Exception as exc:
+        log_event(
+            thread_id,
+            "rerun_step_error",
+            {
+                "step_id": step_id,
+                "error": str(exc),
+            },
+        )
+        raise
     interrupt_payload = _extract_interrupt_payload(result)
     new_snapshot = _snapshot_graph_state(graph, new_config, result)
     _write_runtime_outputs(thread_id, new_snapshot, interrupt_payload)
+    log_event(
+        thread_id,
+        "rerun_step_ok",
+        {
+            "step_id": step_id,
+            "status": new_snapshot.get("status", ""),
+            "current_step": new_snapshot.get("current_step", ""),
+            "interrupted": bool(interrupt_payload),
+        },
+    )
     return {
         "state": new_snapshot,
         "interrupt": interrupt_payload or {},
@@ -446,6 +621,11 @@ def dashboard_env_summary() -> Dict[str, str]:
         "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", ""),
         "OPENAI_MODEL": os.getenv("OPENAI_MODEL", ""),
         "OPENAI_USE_RESPONSES_API": os.getenv("OPENAI_USE_RESPONSES_API", ""),
+        "LANGSMITH_TRACING": os.getenv("LANGSMITH_TRACING", ""),
+        "LANGSMITH_TRACING_V2": os.getenv("LANGSMITH_TRACING_V2", ""),
+        "LANGCHAIN_TRACING_V2": os.getenv("LANGCHAIN_TRACING_V2", ""),
+        "LANGSMITH_PROJECT": os.getenv("LANGSMITH_PROJECT", ""),
+        "LANGSMITH_ENDPOINT": os.getenv("LANGSMITH_ENDPOINT", ""),
     }
 
 
@@ -457,9 +637,11 @@ def slugify_short_name(raw: str) -> str:
 
 
 def build_thread_id(tapd_id: str, short_name: str) -> str:
-    tapd = tapd_id.strip() or "TAPDpending"
-    if not tapd.lower().startswith("tapd"):
-        tapd = f"TAPD{tapd}"
+    raw_tapd = tapd_id.strip()
+    if not raw_tapd:
+        tapd = "TAPDpending"
+    else:
+        tapd, _ = normalize_tapd_reference(raw_tapd)
     return f"{tapd}_{slugify_short_name(short_name)}"
 
 
@@ -468,6 +650,7 @@ def build_initial_state(
     title: str,
     brief: str,
     predecessors: List[str],
+    tapd_url: str = "",
     interactive_review: bool = True,
 ) -> Dict[str, Any]:
     requirement_dir = resolve_requirement_dir(thread_id)
@@ -481,9 +664,11 @@ def build_initial_state(
         "title": title_value,
         "requirement_name": title_value,
         "tapd_id": tapd_id,
+        "tapd_url": tapd_url.strip(),
         "predecessor_requirements": predecessors,
         "brief": brief,
         "interactive_review": interactive_review,
+        "external_contexts": {},
         "node_inputs": {},
         "node_statuses": {},
         "source_script_info": {},
@@ -498,12 +683,39 @@ def build_initial_state(
 
 def start_thread(initial_state: Dict[str, Any]) -> Dict[str, Any]:
     thread_id = str(initial_state["thread_id"])
+    log_event(
+        thread_id,
+        "start_thread",
+        {
+            "tapd_id": initial_state.get("tapd_id", ""),
+            "title": initial_state.get("title", ""),
+        },
+    )
     graph = build_requirement_graph()
-    config = {"configurable": {"thread_id": thread_id}}
-    result = graph.invoke(initial_state, config=config)
+    config = graph_run_config(initial_state, operation="start_thread")
+    try:
+        result = graph.invoke(initial_state, config=config)
+    except Exception as exc:
+        log_event(
+            thread_id,
+            "start_thread_error",
+            {
+                "error": str(exc),
+            },
+        )
+        raise
     interrupt_payload = _extract_interrupt_payload(result)
     snapshot = _snapshot_graph_state(graph, config, result)
     _write_runtime_outputs(thread_id, snapshot, interrupt_payload)
+    log_event(
+        thread_id,
+        "start_thread_ok",
+        {
+            "status": snapshot.get("status", ""),
+            "current_step": snapshot.get("current_step", ""),
+            "interrupted": bool(interrupt_payload),
+        },
+    )
     return {
         "thread_id": thread_id,
         "state": snapshot,
@@ -519,7 +731,8 @@ def create_requirement_thread(
     predecessors: List[str],
     auto_start: bool,
 ) -> Dict[str, Any]:
-    thread_id = build_thread_id(tapd_id, short_name)
+    normalized_tapd_id, normalized_tapd_url = normalize_tapd_reference(tapd_id)
+    thread_id = build_thread_id(normalized_tapd_id, short_name)
     requirement_dir = resolve_requirement_dir(thread_id)
     if requirement_dir.exists():
         raise ValueError(f"Requirement directory already exists: {requirement_dir}")
@@ -530,6 +743,7 @@ def create_requirement_thread(
         title=title,
         brief=brief,
         predecessors=predecessors,
+        tapd_url=normalized_tapd_url,
         interactive_review=True,
     )
 

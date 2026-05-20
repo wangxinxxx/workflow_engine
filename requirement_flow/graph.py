@@ -1,13 +1,12 @@
 
 import copy
 import os
-import re
 import sqlite3
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
 from .config import CHECKPOINT_DB, TEMPLATE_DIR, ensure_runtime_dirs
+from .debug_trace import log_event
 from .file_store import (
     read_requirement_files,
     render_requirement_readme,
@@ -15,11 +14,18 @@ from .file_store import (
     write_requirement_files,
 )
 from .llm import build_llm, coerce_ai_content
+from .node_executors import run_finalize_executor, run_prepare_executor
 from .prompts import SYSTEM_PROMPT, build_node_prompt
 from .schemas import RequirementState, utc_now_iso
+from .tracing import llm_run_config, node_metadata
 from .workflow_defs import SQL_MODIFY_WORKFLOW_ID, get_workflow_definition
 
-FETCH_AND_CONFIRM_CHANGES_NODE_ID = "fetch_and_confirm_changes"
+
+def _debug_breakpoint(label: str) -> None:
+    if str(os.getenv("REQUIREMENT_FLOW_DEBUG_BREAKPOINTS", "") or "").strip() != "1":
+        return
+    print(f"[debug-breakpoint] {label}")
+    breakpoint()
 
 
 def _workflow_nodes() -> List[Dict[str, object]]:
@@ -55,15 +61,22 @@ def _draft_default_for_node(node_id: str, requirement_name: str) -> str:
     # 当模型没有返回有效内容时，给每个节点一个最小可编辑草稿，避免页面空白。
     if node_id == "requirement_confirm":
         return (
-            "# 需求确认\n\n"
-            f"## 需求名\n\n- {requirement_name or '-'}\n\n"
-            "## 背景\n\n-\n\n"
-            "## 目标\n\n-\n\n"
-            "## 范围\n\n-\n\n"
-            "## 风险与待确认项\n\n-\n"
+            "# 需求文档\n\n"
+            f"## 需求名称\n\n- {requirement_name or '-'}\n\n"
+            "## 需求背景\n\n-\n\n"
+            "## 需求目标\n\n-\n\n"
+            "## 需求范围\n\n-\n\n"
+            "## 核心规则与约束\n\n-\n\n"
+            "## 待确认项\n\n-\n"
         )
     if node_id == "task_confirm":
-        return "# 任务清单\n\n## 待执行任务\n\n- [ ] \n"
+        return (
+            "# 开发文档\n\n"
+            f"## 需求名称\n\n- {requirement_name or '-'}\n\n"
+            "## 开发目标\n\n-\n\n"
+            "## 执行任务清单\n\n- [ ] \n\n"
+            "## 改动项确认\n\n-\n"
+        )
     if node_id == "fetch_and_confirm_changes":
         return (
             "# 改动项确认\n\n"
@@ -82,154 +95,6 @@ def _draft_default_for_node(node_id: str, requirement_name: str) -> str:
 
 def _artifact_key_for_node(node: Dict[str, object]) -> str:
     return str(node.get("artifact_key", "") or "")
-
-
-def _safe_read_text(path: Path) -> str:
-    try:
-        if path.exists() and path.is_file():
-            return path.read_text(encoding="utf-8")
-    except Exception:
-        return ""
-    return ""
-
-
-def _extract_fetch_fields(content: str) -> Dict[str, str]:
-    fields = {
-        "task_name": "",
-        "task_id": "",
-        "script_path": "",
-        "source_type": "",
-        "local_sql_path": "",
-    }
-    pattern = re.compile(
-        r"^\s*(?:-\s*)?(task_name|task_id|script_path|source_type|local_sql_path)\s*:\s*(.+?)\s*$",
-        re.IGNORECASE,
-    )
-    for line in content.splitlines():
-        matched = pattern.match(line)
-        if not matched:
-            continue
-        key = matched.group(1).strip().lower()
-        value = matched.group(2).strip()
-        if value:
-            fields[key] = value
-    return fields
-
-
-def _resolve_requirement_local_path(requirement_dir: Path, raw_path: str) -> Path:
-    candidate = Path(raw_path).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    return (requirement_dir / candidate).resolve()
-
-
-def _pull_online_sql_from_env_command(
-    state: RequirementState,
-    requirement_dir: Path,
-    fields: Dict[str, str],
-) -> str:
-    command_template = os.getenv("REQUIREMENT_FLOW_SQL_FETCH_CMD", "").strip()
-    if not command_template:
-        return ""
-
-    values = {
-        "thread_id": str(state.get("thread_id", "") or ""),
-        "tapd_id": str(state.get("tapd_id", "") or ""),
-        "requirement_dir": str(requirement_dir),
-        "task_id": fields.get("task_id", ""),
-        "task_name": fields.get("task_name", ""),
-        "script_path": fields.get("script_path", ""),
-        "source_type": fields.get("source_type", ""),
-        "local_sql_path": fields.get("local_sql_path", ""),
-    }
-    try:
-        command = command_template.format(**values)
-    except Exception:
-        return ""
-
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(requirement_dir),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return ""
-
-    if completed.returncode != 0:
-        return ""
-
-    content = (completed.stdout or "").strip()
-    return content + "\n" if content else ""
-
-
-def _pull_online_sql_content(
-    state: RequirementState,
-    requirement_dir: Path,
-    artifacts: Dict[str, str],
-) -> str:
-    existing_artifact = str(artifacts.get("online_sql/source.sql", "") or "").strip()
-    if existing_artifact:
-        return existing_artifact + "\n"
-
-    raw_fetch_doc = str(artifacts.get("online_sql/source.sql", "") or "")
-    raw_dev_doc = str(artifacts.get("docs/开发文档.md", "") or "")
-    fields = _extract_fetch_fields(raw_fetch_doc)
-    if not fields.get("script_path"):
-        doc_fields = _extract_fetch_fields(raw_dev_doc)
-        fields = {**doc_fields, **{k: v for k, v in fields.items() if v}}
-
-    fetched = _pull_online_sql_from_env_command(state, requirement_dir, fields)
-    if fetched.strip():
-        return fetched
-
-    candidates: List[Path] = []
-    local_sql_path = str(state.get("local_sql_path", "") or "").strip()
-    if local_sql_path:
-        candidates.append(_resolve_requirement_local_path(requirement_dir, local_sql_path))
-    parsed_local_sql_path = fields.get("local_sql_path", "").strip()
-    if parsed_local_sql_path:
-        candidates.append(_resolve_requirement_local_path(requirement_dir, parsed_local_sql_path))
-    parsed_script_path = fields.get("script_path", "").strip()
-    if parsed_script_path:
-        candidates.append(_resolve_requirement_local_path(requirement_dir, parsed_script_path))
-    candidates.append(requirement_dir / "online_sql" / "source.sql")
-
-    seen: set[str] = set()
-    for path in candidates:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        content = _safe_read_text(path).strip()
-        if content:
-            return content + "\n"
-    return ""
-
-
-def _apply_fetch_node_state_updates(
-    state: RequirementState,
-    content: str,
-    requirement_dir: Path,
-) -> Dict[str, object]:
-    fields = _extract_fetch_fields(content)
-    source_script_info = dict(state.get("source_script_info", {}) or {})
-    for key in ("task_name", "task_id", "script_path", "source_type"):
-        value = fields.get(key, "").strip()
-        if value:
-            source_script_info[key] = value
-
-    updates: Dict[str, object] = {
-        "source_script_info": source_script_info,
-    }
-    local_sql_path = fields.get("local_sql_path", "").strip()
-    if local_sql_path:
-        resolved = _resolve_requirement_local_path(requirement_dir, local_sql_path)
-        updates["local_sql_path"] = str(resolved)
-    return updates
 
 
 def _sync_support_artifacts(state: RequirementState, artifacts: Dict[str, str]) -> Dict[str, str]:
@@ -280,26 +145,99 @@ def _make_node(node_def: Dict[str, object]):
     def _node(state: RequirementState):
         from langgraph.types import Command, interrupt
 
+        # BREAKPOINT HERE:
+        # 看 prepare_updates 合并后，artifacts["docs/需求文档.md"] 是否还是新内容。
+        # 这是 graph 层接收 executor 产物的关键位置。
         # 每个业务节点都遵循相同模型:
         # 1. 基于当前 state 生成一版草稿
         # 2. 进入人工审核中断
         # 3. 根据 approve / edit / rerun_with_input 决定后续流转
         requirement_dir = Path(state["requirement_dir"])
+        thread_id = str(state.get("thread_id", "") or requirement_dir.name)
         node_statuses = _ensure_node_statuses(state)
         node_inputs = _ensure_node_inputs(state)
         artifacts = dict(state.get("artifacts", {}))
+        log_event(
+            thread_id,
+            "node_start",
+            {
+                "node_id": node_id,
+                "status": state.get("status", ""),
+                "current_step": state.get("current_step", ""),
+            },
+        )
 
-        if node_id == FETCH_AND_CONFIRM_CHANGES_NODE_ID:
-            pulled_sql = _pull_online_sql_content(state, requirement_dir, artifacts)
-            if pulled_sql.strip():
-                artifacts["online_sql/source.sql"] = pulled_sql
+        prepare_updates = run_prepare_executor(node_id, state, node_def, artifacts, requirement_dir)
+        if node_id == "requirement_confirm":
+            _debug_breakpoint("graph.after_requirement_confirm_prepare")
+        log_event(
+            thread_id,
+            "node_prepare_done",
+            {
+                "node_id": node_id,
+                "prepare_keys": sorted([str(key) for key in prepare_updates.keys()]),
+                "prepare_updates": prepare_updates,
+            },
+        )
+        prepared_artifacts = dict(prepare_updates.get("artifacts", {}) or {})
+        if prepared_artifacts:
+            artifacts.update({key: str(value) for key, value in prepared_artifacts.items()})
+        prepared_state: RequirementState = {
+            **state,
+            **{key: value for key, value in prepare_updates.items() if key != "artifacts"},
+            "artifacts": artifacts,
+        }
 
-        # 先调模型产出当前节点草稿，并写入该节点绑定的 artifact。
-        llm = build_llm()
-        prompt_state = {**state, "artifacts": artifacts}
-        prompt = build_node_prompt(prompt_state, node_def)
-        response = llm.invoke([("system", SYSTEM_PROMPT), ("human", prompt)])
-        drafted_content = coerce_ai_content(response).strip() or artifacts.get(artifact_key, "")
+        llm_enabled = bool(node_def.get("llm_enabled", True))
+        drafted_content = artifacts.get(artifact_key, "")
+        if llm_enabled:
+            llm = build_llm()
+            prompt_state = {**prepared_state, "artifacts": artifacts}
+            prompt = build_node_prompt(prompt_state, node_def)
+            log_event(
+                thread_id,
+                "node_llm_start",
+                {
+                    "node_id": node_id,
+                    "system_prompt": SYSTEM_PROMPT,
+                    "human_prompt": prompt,
+                    "artifacts_before_llm": artifacts,
+                },
+            )
+            try:
+                response = llm.invoke(
+                    [("system", SYSTEM_PROMPT), ("human", prompt)],
+                    config=llm_run_config(prompt_state, node_def),
+                )
+            except Exception as exc:
+                log_event(
+                    thread_id,
+                    "node_llm_error",
+                    {
+                        "node_id": node_id,
+                        "error": str(exc),
+                    },
+                )
+                raise
+            log_event(
+                thread_id,
+                "node_llm_done",
+                {
+                    "node_id": node_id,
+                    "raw_response": getattr(response, "content", response),
+                },
+            )
+            drafted_content = coerce_ai_content(response).strip() or drafted_content
+        else:
+            log_event(
+                thread_id,
+                "node_llm_skipped",
+                {
+                    "node_id": node_id,
+                    "reason": "llm disabled for node",
+                    "artifact_key": artifact_key,
+                },
+            )
         if not drafted_content:
             drafted_content = _draft_default_for_node(node_id, str(state.get("requirement_name", "") or ""))
         if artifact_key:
@@ -315,22 +253,26 @@ def _make_node(node_def: Dict[str, object]):
         }
 
         draft_state: RequirementState = {
-            **state,
+            **prepared_state,
             "artifacts": artifacts,
             "node_statuses": node_statuses,
             "node_inputs": node_inputs,
-            "local_sql_path": str(state.get("local_sql_path") or requirement_dir / "online_sql" / "source.sql"),
+            "local_sql_path": str(
+                prepared_state.get("local_sql_path") or requirement_dir / "online_sql" / "source.sql"
+            ),
             "modified_sql_path": str(
-                state.get("modified_sql_path") or requirement_dir / "draft_sql" / "modified.sql"
+                prepared_state.get("modified_sql_path") or requirement_dir / "draft_sql" / "modified.sql"
             ),
             "self_test_report_path": str(
-                state.get("self_test_report_path") or requirement_dir / "自测报告.md"
+                prepared_state.get("self_test_report_path") or requirement_dir / "自测报告.md"
             ),
             "current_step": node_id,
             "status": "running",
             "latest_interrupt": {},
         }
         draft_state["artifacts"] = _sync_support_artifacts(draft_state, artifacts)
+        if node_id == "requirement_confirm":
+            _debug_breakpoint("graph.before_requirement_confirm_draft_write")
         write_requirement_files(requirement_dir, draft_state["artifacts"])
 
         # 进入 review gate。页面上的通过、编辑、重跑都围绕这个中断点恢复。
@@ -342,6 +284,15 @@ def _make_node(node_def: Dict[str, object]):
             "instructions": str(node_def.get("instructions", "") or ""),
             "actions": list(node_def.get("actions", [])),
         }
+        log_event(
+            thread_id,
+            "node_interrupt",
+            {
+                "node_id": node_id,
+                "actions": list(node_def.get("actions", [])),
+                "interrupt_payload": payload,
+            },
+        )
         decision = interrupt(payload)
 
         action = ""
@@ -353,11 +304,30 @@ def _make_node(node_def: Dict[str, object]):
             note = str(decision.get("note", "") or decision.get("review_note", "")).strip()
         elif isinstance(decision, str):
             action = decision.strip().lower()
+        log_event(
+            thread_id,
+            "node_interrupt_decision",
+            {
+                "node_id": node_id,
+                "action": action,
+                "note": note,
+                "content": content,
+                "decision": decision,
+            },
+        )
 
         # rerun_with_input:
         # 保留人工补充说明，把当前节点状态打回 pending，然后直接回跳到自己重跑。
         if action == "rerun_with_input":
             if note:
+                log_event(
+                    thread_id,
+                    "node_rerun_with_input",
+                    {
+                        "node_id": node_id,
+                        "note_len": len(note),
+                    },
+                )
                 return Command(
                     update={
                         "node_inputs": {node_id: [note]},
@@ -396,33 +366,61 @@ def _make_node(node_def: Dict[str, object]):
             "note": note,
         }
 
-        node_state_updates: Dict[str, object] = {}
-        if node_id == FETCH_AND_CONFIRM_CHANGES_NODE_ID:
-            node_state_updates = _apply_fetch_node_state_updates(state, final_content, requirement_dir)
+        final_artifacts = dict(artifacts)
+        if artifact_key:
+            final_artifacts[artifact_key] = final_content
+        finalized_state: RequirementState = {
+            **prepared_state,
+            "artifacts": final_artifacts,
+        }
+        node_state_updates = run_finalize_executor(node_id, finalized_state, node_def, final_artifacts, requirement_dir)
+        log_event(
+            thread_id,
+            "node_finalize_done",
+            {
+                "node_id": node_id,
+                "action": action,
+                "finalize_keys": sorted([str(key) for key in node_state_updates.keys()]),
+                "node_state_updates": node_state_updates,
+                "final_content": final_content,
+            },
+        )
 
         next_state: RequirementState = {
-            **state,
+            **prepared_state,
             **node_state_updates,
-            "artifacts": artifacts,
+            "artifacts": final_artifacts,
             "node_statuses": node_statuses,
             "node_inputs": node_inputs,
             "local_sql_path": str(
                 node_state_updates.get("local_sql_path")
-                or state.get("local_sql_path")
+                or prepared_state.get("local_sql_path")
                 or requirement_dir / "online_sql" / "source.sql"
             ),
             "modified_sql_path": str(
-                state.get("modified_sql_path") or requirement_dir / "draft_sql" / "modified.sql"
+                prepared_state.get("modified_sql_path") or requirement_dir / "draft_sql" / "modified.sql"
             ),
             "self_test_report_path": str(
-                state.get("self_test_report_path") or requirement_dir / "自测报告.md"
+                prepared_state.get("self_test_report_path") or requirement_dir / "自测报告.md"
             ),
             "current_step": node_id,
             "status": "running",
             "latest_interrupt": {},
         }
         next_state["artifacts"] = _sync_support_artifacts(next_state, artifacts)
+        if node_id == "requirement_confirm":
+            _debug_breakpoint("graph.before_requirement_confirm_final_write")
         write_requirement_files(requirement_dir, next_state["artifacts"])
+        log_event(
+            thread_id,
+            "node_complete",
+            {
+                "node_id": node_id,
+                "current_step": next_state.get("current_step", ""),
+                "status": next_state.get("status", ""),
+                "artifacts_after_node": next_state.get("artifacts", {}),
+            },
+        )
         return next_state
 
     return _node
@@ -441,6 +439,14 @@ def _finalize_node(state: RequirementState) -> RequirementState:
         dict(state.get("artifacts", {})),
     )
     write_requirement_files(requirement_dir, artifacts)
+    log_event(
+        str(state.get("thread_id", "") or requirement_dir.name),
+        "workflow_finalize",
+        {
+            "current_step": "done",
+            "status": "completed",
+        },
+    )
     return {
         **state,
         "artifacts": artifacts,
@@ -461,17 +467,25 @@ def build_requirement_graph() -> Any:
     # Graph 结构保持单链路:
     # load_context -> 6 个主节点 -> finalize -> END
     builder = StateGraph(RequirementState)
-    builder.add_node("load_context", _load_context_node)
+    builder.add_node(
+        "load_context",
+        _load_context_node,
+        metadata={"workflow_type": SQL_MODIFY_WORKFLOW_ID, "node_id": "load_context", "stage": "system"},
+    )
     builder.add_edge(START, "load_context")
 
     previous_node = "load_context"
     for node in _workflow_nodes():
         node_id = str(node["id"])
-        builder.add_node(node_id, _make_node(node))
+        builder.add_node(node_id, _make_node(node), metadata=node_metadata(node))
         builder.add_edge(previous_node, node_id)
         previous_node = node_id
 
-    builder.add_node("finalize", _finalize_node)
+    builder.add_node(
+        "finalize",
+        _finalize_node,
+        metadata={"workflow_type": SQL_MODIFY_WORKFLOW_ID, "node_id": "finalize", "stage": "system"},
+    )
     builder.add_edge(previous_node, "finalize")
     builder.add_edge("finalize", END)
 

@@ -13,7 +13,9 @@ from .file_store import (
     write_runtime_snapshot,
 )
 from .graph import build_requirement_graph
+from .node_executors import normalize_tapd_reference
 from .schemas import RequirementState
+from .tracing import graph_run_config
 
 
 def _load_text(path: Optional[str], inline: Optional[str]) -> str:
@@ -77,15 +79,23 @@ def _print_result(thread_id: str, state: Dict[str, object], interrupt_payload: O
 
 def _initial_state_from_args(args: argparse.Namespace, requirement_dir: Path) -> RequirementState:
     brief = _load_text(args.brief_file, args.brief_text)
+    derived_tapd = _derive_tapd_id(requirement_dir, args.tapd_id)
+    tapd_url = ""
+    try:
+        normalized_tapd_id, tapd_url = normalize_tapd_reference(derived_tapd)
+    except ValueError:
+        normalized_tapd_id = derived_tapd
     return {
         "thread_id": requirement_dir.name,
         "requirement_dir": str(requirement_dir),
         "template_dir": str(TEMPLATE_DIR),
         "title": _derive_title(requirement_dir, args.title),
-        "tapd_id": _derive_tapd_id(requirement_dir, args.tapd_id),
+        "tapd_id": normalized_tapd_id,
+        "tapd_url": tapd_url,
         "predecessor_requirements": args.predecessor or [],
         "brief": brief,
         "interactive_review": not args.auto_approve,
+        "external_contexts": {},
         "status": "created",
     }
 
@@ -95,7 +105,7 @@ def run_command(args: argparse.Namespace) -> int:
     requirement_dir = resolve_requirement_dir(args.requirement_dir)
     state = _initial_state_from_args(args, requirement_dir)
     graph = build_requirement_graph()
-    config = {"configurable": {"thread_id": requirement_dir.name}}
+    config = graph_run_config(state, operation="cli_run")
     try:
         result = graph.invoke(state, config=config)
         interrupt_payload = _interrupt_payload(result)
@@ -132,7 +142,14 @@ def resume_command(args: argparse.Namespace) -> int:
     ensure_runtime_dirs()
     requirement_dir = resolve_requirement_dir(args.requirement_dir)
     graph = build_requirement_graph()
-    config = {"configurable": {"thread_id": requirement_dir.name}}
+    config = graph_run_config(
+        {
+            "thread_id": requirement_dir.name,
+            "requirement_dir": str(requirement_dir),
+            "workflow_type": "sql_modify",
+        },
+        operation="cli_resume",
+    )
     from langgraph.types import Command
 
     payload = _load_resume_payload(args)

@@ -1,8 +1,15 @@
-from workflow_engine.requirement_flow.step_specs import load_step_specs
+import unittest
+
+from requirement_flow.step_specs import load_step_specs
 
 
-def test_step_specs_have_unique_ids():
-    specs = load_step_specs()
-    assert specs
-    ids = [spec.id for spec in specs]
-    assert len(ids) == len(set(ids))
+class StepSpecsTest(unittest.TestCase):
+    def test_step_specs_have_unique_ids(self):
+        specs = load_step_specs()
+        self.assertTrue(specs)
+        ids = [spec.id for spec in specs]
+        self.assertEqual(len(ids), len(set(ids)))
+
+
+if __name__ == "__main__":
+    unittest.main()

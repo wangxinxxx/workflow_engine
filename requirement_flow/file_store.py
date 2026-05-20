@@ -28,6 +28,8 @@ def read_requirement_files(requirement_dir: Path, step_specs: Iterable[StepSpec]
     artifacts: Dict[str, str] = {}
     readme = requirement_dir / "README.md"
     artifacts["README.md"] = readme.read_text(encoding="utf-8") if readme.exists() else ""
+    requirement_doc = requirement_dir / "docs" / "需求文档.md"
+    artifacts["docs/需求文档.md"] = requirement_doc.read_text(encoding="utf-8") if requirement_doc.exists() else ""
     dev_doc = requirement_dir / "docs" / "开发文档.md"
     artifacts["docs/开发文档.md"] = dev_doc.read_text(encoding="utf-8") if dev_doc.exists() else ""
     online_sql = requirement_dir / "online_sql" / "source.sql"
@@ -83,7 +85,7 @@ def render_requirement_readme(state: RequirementState, ordered_specs: List[StepS
         "",
         f"- 目录名：{requirement_dir.name}",
         f"- 主 TAPD：{state.get('tapd_id', '') or '-'}",
-        f"- 关联 TAPD：-",
+        f"- 关联 TAPD：{state.get('tapd_url', '') or '-'}",
         f"- 前置需求：{predecessor_text}",
         f"- 当前状态：{current_status}",
         f"- Workflow Type：{workflow_type}",
@@ -107,7 +109,8 @@ def render_requirement_readme(state: RequirementState, ordered_specs: List[StepS
         lines.append(f"- `{artifact_key}`：{node['label']}（{status}）")
     lines.extend(
         [
-            "- `docs/`：开发文档与任务说明",
+            "- `docs/需求文档.md`：需求确认稿",
+            "- `docs/开发文档.md`：开发实施文档",
             "- `online_sql/`：拉取下来的线上 SQL",
             "- `draft_sql/`：本地修改草稿",
             "- `validation_sql/`：校验 SQL",

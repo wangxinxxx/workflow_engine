@@ -168,7 +168,7 @@ def render_intake_form(form_data: Dict[str, str]) -> str:
       <div class="intake-grid">
         <label>
           <strong>TAPD ID</strong>
-          <input type="text" name="tapd_id" placeholder="1120848741001796117 或 TAPD112084..." value="{escape_html(form_data.get('tapd_id', ''))}" required />
+          <input type="text" name="tapd_id" placeholder="1120848741001796117、TAPD112084... 或完整 TAPD URL" value="{escape_html(form_data.get('tapd_id', ''))}" required />
         </label>
         <label>
           <strong>Short Name</strong>
@@ -380,6 +380,7 @@ def render_start_panel(thread_id: str, state: Dict[str, Any]) -> str:
 def ordered_artifact_names(artifacts: Dict[str, Any]) -> List[str]:
     preferred = [
         "README.md",
+        "docs/需求文档.md",
         "docs/开发文档.md",
         "online_sql/source.sql",
         "draft_sql/modified.sql",
