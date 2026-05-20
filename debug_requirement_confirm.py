@@ -3,7 +3,7 @@ import json
 from requirement_flow.runtime import rerun_step
 
 
-THREAD_ID = "TAPDnew5_ff"
+THREAD_ID = "TAPDNEW5_ff"
 NOTE = "https://www.tapd.cn/tapd_fe/20848741/story/detail/1120848741001823055 获取需求"
 
 

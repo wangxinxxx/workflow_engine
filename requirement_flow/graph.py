@@ -56,43 +56,6 @@ def _ensure_node_inputs(state: RequirementState) -> Dict[str, List[str]]:
         node_inputs.setdefault(str(node["id"]), [])
     return node_inputs
 
-
-def _draft_default_for_node(node_id: str, requirement_name: str) -> str:
-    # 当模型没有返回有效内容时，给每个节点一个最小可编辑草稿，避免页面空白。
-    if node_id == "requirement_confirm":
-        return (
-            "# 需求文档\n\n"
-            f"## 需求名称\n\n- {requirement_name or '-'}\n\n"
-            "## 需求背景\n\n-\n\n"
-            "## 需求目标\n\n-\n\n"
-            "## 需求范围\n\n-\n\n"
-            "## 核心规则与约束\n\n-\n\n"
-            "## 待确认项\n\n-\n"
-        )
-    if node_id == "task_confirm":
-        return (
-            "# 开发文档\n\n"
-            f"## 需求名称\n\n- {requirement_name or '-'}\n\n"
-            "## 开发目标\n\n-\n\n"
-            "## 执行任务清单\n\n- [ ] \n\n"
-            "## 改动项确认\n\n-\n"
-        )
-    if node_id == "fetch_and_confirm_changes":
-        return (
-            "# 改动项确认\n\n"
-            "## 对应脚本信息\n\n- task_name:\n- task_id:\n- script_path:\n- source_type:\n\n"
-            "## 本地 SQL 路径\n\n- local_sql_path:\n\n"
-            "## 改动项\n\n- \n"
-        )
-    if node_id == "local_edit_draft":
-        return "-- modified sql draft\n"
-    if node_id == "validate_result":
-        return "# 自测报告\n\n## 校验项\n\n- \n\n## 结果\n\n- \n"
-    if node_id == "deliver":
-        return "# 交付说明\n\n## 交付物\n\n- \n\n## 最终结论\n\n- \n"
-    return ""
-
-
 def _artifact_key_for_node(node: Dict[str, object]) -> str:
     return str(node.get("artifact_key", "") or "")
 
@@ -239,7 +202,7 @@ def _make_node(node_def: Dict[str, object]):
                 },
             )
         if not drafted_content:
-            drafted_content = _draft_default_for_node(node_id, str(state.get("requirement_name", "") or ""))
+            drafted_content = '未解析出结果'
         if artifact_key:
             artifacts[artifact_key] = drafted_content
 
