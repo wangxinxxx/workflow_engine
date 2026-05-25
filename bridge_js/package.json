@@ -1,0 +1,17 @@
+{
+  "name": "feishu-codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.55.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "notify": "node src/notify.js",
+    "check": "node --check src/server.js && node --check src/feishu.js && node --check src/workflows.js && node --check src/env.js && node --check src/notify.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

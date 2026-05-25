@@ -475,7 +475,7 @@ def requirement_confirm_prepare(
     requirement_dir: Path,
 ) -> Dict[str, object]:
     _debug_breakpoint("node_executors.requirement_confirm_prepare")
-    del node_def
+    del node_def, artifacts
     ensure_env_loaded()
 
     normalized_tapd_id = str(state.get("tapd_id", "") or "").strip()
@@ -488,17 +488,8 @@ def requirement_confirm_prepare(
     contexts["tapd_requirement_fetch_status"] = fetch_status
     if fetched_requirement:
         contexts["tapd_requirement_detail"] = fetched_requirement
-    fetched, status = _run_requirement_confirm_codex(
-        state,
-        artifacts,
-        requirement_dir,
-        normalized_tapd_id,
-        normalized_tapd_url,
-        contexts,
-    )
-    contexts["requirement_confirm_executor_status"] = status
-    if fetched:
-        contexts["codex_requirement_context"] = fetched
+    contexts["requirement_confirm_executor_status"] = "skipped: local codex disabled"
+    fetched = ""
 
     updates: Dict[str, object] = {
         "tapd_id": normalized_tapd_id,

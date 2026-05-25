@@ -1,6 +1,7 @@
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,6 +15,7 @@ from .file_store import (
 )
 from .graph import build_requirement_graph
 from .node_executors import normalize_tapd_reference
+from .runtime import create_requirement_thread
 from .schemas import RequirementState
 from .tracing import graph_run_config
 
@@ -126,6 +128,106 @@ def run_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def _parse_message_options(text: str) -> Dict[str, str]:
+    try:
+        tokens = shlex.split(str(text or "").strip(), posix=False)
+    except ValueError:
+        tokens = str(text or "").strip().split()
+    start = next((index for index, token in enumerate(tokens) if str(token).startswith("--")), -1)
+    if start < 0:
+        return {}
+
+    options: Dict[str, str] = {}
+    index = start
+    while index < len(tokens):
+        token = str(tokens[index] or "")
+        if not token.startswith("--"):
+            index += 1
+            continue
+
+        key = token[2:].lower()
+        values = []
+        index += 1
+        while index < len(tokens) and not str(tokens[index] or "").startswith("--"):
+            values.append(str(tokens[index]))
+            index += 1
+        options[key] = " ".join(values).strip()
+    return options
+
+
+def _first_non_empty(*values: Optional[str]) -> str:
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        trimmed = value.strip()
+        if trimmed:
+            return trimmed
+        if value == "":
+            return ""
+    return ""
+
+
+def _is_truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def handle_message_command(args: argparse.Namespace) -> int:
+    ensure_runtime_dirs()
+    options = _parse_message_options(args.text)
+    if not options:
+        print(
+            "Unsupported message.\n"
+            "Use: 创建工作流 --tapd-id <id> --short-name <slug> (--brief <text> | --brief-file <path>) [--title <text>] [--auto-approve]"
+        )
+        return 0
+
+    tapd_id = _first_non_empty(options.get("tapd-id"), options.get("tapd"), options.get("t"))
+    short_name = _first_non_empty(options.get("short-name"), options.get("short"), options.get("s"))
+    brief = _first_non_empty(options.get("brief"), options.get("b"))
+    brief_file = _first_non_empty(options.get("brief-file"))
+    title = _first_non_empty(options.get("title"))
+    auto_approve_raw = _first_non_empty(options.get("auto-approve"))
+    auto_start = auto_approve_raw == "" or _is_truthy(auto_approve_raw)
+
+    if not tapd_id or not short_name or (not brief and not brief_file):
+        print(
+            "Usage:\n"
+            "创建工作流 --tapd-id <id> --short-name <slug> (--brief <text> | --brief-file <path>) [--title <text>] [--auto-approve]"
+        )
+        return 0
+
+    if brief_file:
+        brief = Path(brief_file).expanduser().read_text(encoding="utf-8")
+
+    try:
+        result = create_requirement_thread(
+            tapd_id=tapd_id,
+            short_name=short_name,
+            title=title,
+            brief=brief,
+            predecessors=[],
+            auto_start=auto_start,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    state = dict(result.get("state", {}) or {})
+    interrupt_payload = result.get("interrupt")
+    print(
+        "\n".join(
+            [
+                "Workflow created",
+                f"Thread: {result.get('thread_id', '-')}",
+                f"Status: {state.get('status', 'unknown')}",
+                f"Current: {state.get('current_step', 'unknown')}",
+                f"Review: {'pending' if interrupt_payload else 'none'}",
+            ]
+        )
+    )
+    return 0
+
+
 def _load_resume_payload(args: argparse.Namespace) -> object:
     if args.approve:
         return {"action": "approve"}
@@ -202,6 +304,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--predecessor", action="append", help="Predecessor requirement directory name.")
     run_parser.add_argument("--auto-approve", action="store_true", help="Skip interrupt-based human review.")
     run_parser.set_defaults(func=run_command)
+
+    message_parser = subparsers.add_parser("handle-message", help="Route a raw chat message into workflow handling.")
+    message_parser.add_argument("--text", required=True, help="Raw chat message text.")
+    message_parser.set_defaults(func=handle_message_command)
 
     resume_parser = subparsers.add_parser("resume", help="Resume a paused review step.")
     resume_parser.add_argument("--requirement-dir", required=True, help="Requirement directory name or path.")

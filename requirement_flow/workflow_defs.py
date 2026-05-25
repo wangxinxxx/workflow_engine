@@ -52,7 +52,7 @@ SQL_MODIFY_WORKFLOW: Dict[str, object] = {
             "inputs": ["brief", "tapd_id", "requirement_name"],
             "outputs": ["requirement_confirmed_file"],
             "artifact_key": "docs/需求文档.md",
-            "llm_enabled": False,
+            "llm_enabled": True,
             "preferred_skills": ["requirement-doc-parser", "tapd-requirement-fetcher", "tapd-requirement-intake"],
             "actions": ["approve", "edit", "rerun_with_input"],
         },
