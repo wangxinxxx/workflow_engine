@@ -116,7 +116,7 @@ async function createWorkflow(args) {
   ].join("\n");
 }
 
-async function routeMessage(args) {
+async function routeMessage(args, context) {
   const text = String(args[0] || "").trim();
   if (!text) {
     return "Empty message.";
@@ -127,9 +127,25 @@ async function routeMessage(args) {
   }
 
   const invocation = resolveWorkflowInvocation();
+  const runArgs = [...invocation.prefixArgs, "handle-message", "--text", text];
+  if (context?.chatId) {
+    runArgs.push("--chat-id", String(context.chatId));
+  }
+  if (context?.chatType) {
+    runArgs.push("--chat-type", String(context.chatType));
+  }
+  if (context?.senderId?.open_id) {
+    runArgs.push("--user-open-id", String(context.senderId.open_id));
+  }
+  if (context?.messageId) {
+    runArgs.push("--message-id", String(context.messageId));
+  }
+  if (context?.eventId) {
+    runArgs.push("--event-id", String(context.eventId));
+  }
   const result = await runProcess(
     invocation.command,
-    [...invocation.prefixArgs, "handle-message", "--text", text],
+    runArgs,
     config.workflowWorkspaceDir,
     config.codexTimeoutMs
   );

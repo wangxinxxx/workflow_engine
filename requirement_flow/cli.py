@@ -1,11 +1,21 @@
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .chat_store import (
+    append_session_message,
+    build_session_id,
+    create_draft_item,
+    create_thread_item,
+    ensure_bridge_runtime_dirs,
+    open_item_count,
+    utc_now_iso,
+)
 from .config import TEMPLATE_DIR, ensure_runtime_dirs, resolve_requirement_dir
 from .dashboard import serve_dashboard
 from .file_store import (
@@ -171,10 +181,72 @@ def _is_truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _build_message_context(args: argparse.Namespace) -> Dict[str, str]:
+    user_open_id = str(args.user_open_id or "").strip() or "unknown-user"
+    chat_type = str(args.chat_type or "").strip() or "unknown"
+    chat_id = str(args.chat_id or "").strip() or "unknown-chat"
+    return {
+        "session_id": build_session_id(chat_type, chat_id, user_open_id),
+        "user_open_id": user_open_id,
+        "chat_type": chat_type,
+        "chat_id": chat_id,
+        "event_id": str(args.event_id or "").strip(),
+        "message_id": str(args.message_id or "").strip(),
+    }
+
+
+def _record_incoming_message(context: Dict[str, str], text: str) -> None:
+    append_session_message(
+        context["session_id"],
+        {
+            "ts": utc_now_iso(),
+            "direction": "in",
+            "text": text,
+            "chat_type": context["chat_type"],
+            "chat_id": context["chat_id"],
+            "user_open_id": context["user_open_id"],
+            "event_id": context["event_id"],
+            "message_id": context["message_id"],
+        },
+    )
+
+
+def _extract_create_title(text: str) -> str:
+    normalized = str(text or "").strip()
+    patterns = [
+        r"^(?:创建(?:一个)?(?:新)?需求|新建需求|创建工作流|新建工作流)\s*(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, normalized)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def handle_message_command(args: argparse.Namespace) -> int:
     ensure_runtime_dirs()
+    ensure_bridge_runtime_dirs()
+    context = _build_message_context(args)
+    raw_text = str(args.text or "").strip()
+    _record_incoming_message(context, raw_text)
+
     options = _parse_message_options(args.text)
     if not options:
+        create_title = _extract_create_title(raw_text)
+        if create_title:
+            item = create_draft_item(context["session_id"], context["user_open_id"], create_title, raw_text)
+            print(
+                "\n".join(
+                    [
+                        "已记录需求草稿",
+                        f"事项: {item['item_id']}",
+                        f"标题: {item['title']}",
+                        f"状态: {item['status']}",
+                        f"会话未完成事项: {open_item_count(context['session_id'])}",
+                    ]
+                )
+            )
+            return 0
         print(
             "Unsupported message.\n"
             "Use: 创建工作流 --tapd-id <id> --short-name <slug> (--brief <text> | --brief-file <path>) [--title <text>] [--auto-approve]"
@@ -214,14 +286,24 @@ def handle_message_command(args: argparse.Namespace) -> int:
 
     state = dict(result.get("state", {}) or {})
     interrupt_payload = result.get("interrupt")
+    thread_id = str(result.get("thread_id", "") or "")
+    create_thread_item(
+        context["session_id"],
+        context["user_open_id"],
+        thread_id=thread_id,
+        title=title or short_name,
+        brief=brief,
+        status=str(state.get("status", "unknown") or "unknown"),
+    )
     print(
         "\n".join(
             [
                 "Workflow created",
-                f"Thread: {result.get('thread_id', '-')}",
+                f"Thread: {thread_id or '-'}",
                 f"Status: {state.get('status', 'unknown')}",
                 f"Current: {state.get('current_step', 'unknown')}",
                 f"Review: {'pending' if interrupt_payload else 'none'}",
+                f"会话未完成事项: {open_item_count(context['session_id'])}",
             ]
         )
     )
@@ -307,6 +389,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     message_parser = subparsers.add_parser("handle-message", help="Route a raw chat message into workflow handling.")
     message_parser.add_argument("--text", required=True, help="Raw chat message text.")
+    message_parser.add_argument("--chat-id", help="Chat id.")
+    message_parser.add_argument("--chat-type", help="Chat type.")
+    message_parser.add_argument("--user-open-id", help="Sender open id.")
+    message_parser.add_argument("--message-id", help="Feishu message id.")
+    message_parser.add_argument("--event-id", help="Feishu event id.")
     message_parser.set_defaults(func=handle_message_command)
 
     resume_parser = subparsers.add_parser("resume", help="Resume a paused review step.")
