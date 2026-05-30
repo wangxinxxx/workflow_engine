@@ -9,14 +9,7 @@ export const config = {
   feishuApiBase: trimTrailingSlash(process.env.FEISHU_API_BASE || "https://open.feishu.cn"),
   feishuAppId: requiredEnv("FEISHU_APP_ID"),
   feishuAppSecret: requiredEnv("FEISHU_APP_SECRET"),
-  feishuDefaultChatId: process.env.FEISHU_DEFAULT_CHAT_ID || "",
-  workspaceDir: process.env.WORKSPACE_DIR || process.cwd(),
-  workflowWorkspaceDir: process.env.WORKFLOW_WORKSPACE_DIR || process.env.WORKSPACE_DIR || process.cwd(),
-  workflowCommand: process.env.WORKFLOW_COMMAND || "requirement-flow",
-  testCommand: process.env.TEST_COMMAND || "npm test",
-  codexCommand: process.env.CODEX_COMMAND || "codex",
-  codexModel: process.env.CODEX_MODEL || "gpt-5.3-codex",
-  codexTimeoutMs: numberFromEnv("CODEX_TIMEOUT_MS", 600_000)
+  feishuDefaultChatId: process.env.FEISHU_DEFAULT_CHAT_ID || ""
 };
 
 function loadDotEnv() {

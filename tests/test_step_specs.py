@@ -1,6 +1,6 @@
 import unittest
 
-from requirement_flow.step_specs import load_step_specs
+from app.workflow.step_specs import load_step_specs
 
 
 class StepSpecsTest(unittest.TestCase):

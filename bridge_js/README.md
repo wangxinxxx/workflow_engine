@@ -1,6 +1,8 @@
 # Feishu Bridge
 
-This directory contains the Feishu long-connection bridge migrated into the `workflow_engine` repository.
+This directory contains the Feishu long-connection message bridge in the `workflow_engine` repository.
+
+The bridge is intentionally narrow: it receives Feishu text messages, emits a receipt, and responds only to a small set of bridge health commands. It does not spawn local workflows, tests, or other subprocesses.
 
 ## Config
 
@@ -14,9 +16,6 @@ Required variables:
 Common runtime variables:
 
 - `FEISHU_DEFAULT_CHAT_ID`
-- `WORKSPACE_DIR`
-- `WORKFLOW_WORKSPACE_DIR`
-- `TEST_COMMAND`
 - `PORT`
 - `HOST`
 
@@ -45,7 +44,5 @@ curl http://127.0.0.1:8787/health
 ## Commands
 
 - `/ping`
-- `/model`
-- `/run-test`
-- `/create-workflow --tapd-id <id> --short-name <slug> --brief <text>`
-- `/codex <request>`
+- `/status`
+- `/help`

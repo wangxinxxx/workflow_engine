@@ -4,12 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from requirement_flow.node_executors import (
+from app.workflow.artifacts import DOC_REQUIREMENT_CONFIRM
+from app.workflow.node_executors import (
     normalize_tapd_reference,
     requirement_confirm_prepare,
 )
-from requirement_flow.schemas import merge_node_input_dicts
-from requirement_flow.runtime import build_thread_id
+from app.workflow.schemas import merge_node_input_dicts
+from app.workflow.runtime import build_thread_id
 
 
 class NodeExecutorsTest(unittest.TestCase):
@@ -79,7 +80,7 @@ class NodeExecutorsTest(unittest.TestCase):
             "structured context\n你在 requirement_confirm 节点的预处理阶段工作。",
         )
         self.assertEqual(
-            updates["artifacts"]["docs/需求文档.md"],
+            updates["artifacts"][DOC_REQUIREMENT_CONFIRM],
             "structured context\n你在 requirement_confirm 节点的预处理阶段工作。",
         )
         self.assertTrue(

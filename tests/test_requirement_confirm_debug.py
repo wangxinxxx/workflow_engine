@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from requirement_flow.node_executors import requirement_confirm_prepare
-from requirement_flow.runtime import _write_runtime_outputs
+from app.workflow.artifacts import DOC_REQUIREMENT_CONFIRM, DOC_SOLUTION_DESIGN
+from app.workflow.node_executors import requirement_confirm_prepare
+from app.workflow.runtime import _write_runtime_outputs
 
 
 class RequirementConfirmDebugTest(unittest.TestCase):
@@ -31,7 +32,7 @@ class RequirementConfirmDebugTest(unittest.TestCase):
         这个用例是给 IDEA 断点调试用的，不走 dashboard / HTTP / 表单。
 
         调试目标:
-        1. 看 requirement_confirm_prepare 是否真的把 Codex 结果放进了 `artifacts["docs/需求文档.md"]`
+        1. 看 requirement_confirm_prepare 是否真的把 Codex 结果放进了需求解析确认文档
         2. 看 graph/runtime 合并状态时，是否把新需求文档覆盖掉
         3. 看 runtime 持久化时，磁盘文件和 latest_state.json 是否一致
 
@@ -75,7 +76,7 @@ class RequirementConfirmDebugTest(unittest.TestCase):
         )
         # 这一段是假 Codex 输出，代表 requirement_confirm 的理想产物。
         # 断点时你可以随意改这里的内容，观察后续哪一步把它覆盖掉。
-        fake_requirement_doc = """# 需求文档
+        fake_requirement_doc = """# 02 需求解析确认文档
 
 ## 需求名称
 上门、门店回收判责详情表添加字段
@@ -93,8 +94,9 @@ class RequirementConfirmDebugTest(unittest.TestCase):
             docs_dir = requirement_dir / "docs"
             docs_dir.mkdir(parents=True, exist_ok=True)
             # 先写一份“旧需求文档”，这是为了复现“新内容被旧内容覆盖”的问题。
-            (docs_dir / "需求文档.md").write_text("# 旧需求文档\n", encoding="utf-8")
-            (docs_dir / "开发文档.md").write_text("", encoding="utf-8")
+            requirement_doc_path = docs_dir / "02 需求解析确认文档.md"
+            requirement_doc_path.write_text("# 旧需求文档\n", encoding="utf-8")
+            (docs_dir / "03 开发方案文档.md").write_text("", encoding="utf-8")
             (requirement_dir / "README.md").write_text("# README\n", encoding="utf-8")
 
             # runtime_root 只给这个测试用，方便你检查 latest_state.json / latest_interrupt.json。
@@ -130,8 +132,8 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                 },
                 "artifacts": {
                     "README.md": "# README\n",
-                    "docs/需求文档.md": "# 旧需求文档\n",
-                    "docs/开发文档.md": "",
+                    DOC_REQUIREMENT_CONFIRM: "# 旧需求文档\n",
+                    DOC_SOLUTION_DESIGN: "",
                 },
                 "current_step": "requirement_confirm",
                 "status": "running",
@@ -139,7 +141,7 @@ class RequirementConfirmDebugTest(unittest.TestCase):
             node_def = {
                 "id": "requirement_confirm",
                 "label": "需求确认",
-                "artifact_key": "docs/需求文档.md",
+                "artifact_key": DOC_REQUIREMENT_CONFIRM,
             }
 
             # 三个 patch 的作用：
@@ -147,13 +149,13 @@ class RequirementConfirmDebugTest(unittest.TestCase):
             # 2. _run_requirement_confirm_codex: 固定 Codex 总结结果
             # 3. thread_runtime_dir: 把 runtime 输出写进临时目录，方便调试，不污染正式 .runtime
             with patch(
-                "requirement_flow.node_executors.fetch_tapd_requirement_detail",
+                "app.workflow.node_executors.fetch_tapd_requirement_detail",
                 return_value=(fake_tapd_detail, "ok: tapd fetch produced 631 chars"),
             ), patch(
-                "requirement_flow.node_executors._run_requirement_confirm_codex",
+                "app.workflow.node_executors._run_requirement_confirm_codex",
                 return_value=(fake_requirement_doc, "ok: local codex produced 200 chars"),
             ), patch(
-                "requirement_flow.runtime.thread_runtime_dir",
+                "app.workflow.runtime.thread_runtime_dir",
                 side_effect=lambda thread_id: runtime_root / thread_id,
             ):
                 # BREAKPOINT 1: 看 prepare executor 的产出。
@@ -165,9 +167,9 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                 )
                 self._print_step(
                     "STEP 1: prepare_updates",
-                    "prepare_updates['artifacts']['docs/需求文档.md'] 已经变成新需求文档，并保留 TAPD/Codex 执行状态。",
-                    old_requirement_doc=state["artifacts"]["docs/需求文档.md"],
-                    prepared_requirement_doc=dict(prepare_updates.get("artifacts", {})).get("docs/需求文档.md", ""),
+                    "prepare_updates['artifacts'][DOC_REQUIREMENT_CONFIRM] 已经变成新需求文档，并保留 TAPD/Codex 执行状态。",
+                    old_requirement_doc=state["artifacts"][DOC_REQUIREMENT_CONFIRM],
+                    prepared_requirement_doc=dict(prepare_updates.get("artifacts", {})).get(DOC_REQUIREMENT_CONFIRM, ""),
                     tapd_fetch_status=dict(prepare_updates.get("external_contexts", {})).get(
                         "tapd_requirement_fetch_status", ""
                     ),
@@ -181,9 +183,9 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                 prepared_artifacts.update(dict(prepare_updates.get("artifacts", {}) or {}))
                 self._print_step(
                     "STEP 2: prepared_artifacts merge",
-                    "prepared_artifacts['docs/需求文档.md'] 覆盖旧文档；interrupt_payload.content 和它完全一致。",
-                    merged_requirement_doc=prepared_artifacts["docs/需求文档.md"],
-                    merge_replaced_old_doc=prepared_artifacts["docs/需求文档.md"] != state["artifacts"]["docs/需求文档.md"],
+                    "prepared_artifacts[DOC_REQUIREMENT_CONFIRM] 覆盖旧文档；interrupt_payload.content 和它完全一致。",
+                    merged_requirement_doc=prepared_artifacts[DOC_REQUIREMENT_CONFIRM],
+                    merge_replaced_old_doc=prepared_artifacts[DOC_REQUIREMENT_CONFIRM] != state["artifacts"][DOC_REQUIREMENT_CONFIRM],
                 )
 
                 # BREAKPOINT 2: 看 merge 后的 artifacts，确认新需求文档已经在内存里。
@@ -193,7 +195,7 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                     "type": "node_review",
                     "step_id": "requirement_confirm",
                     "label": "需求确认",
-                    "content": prepared_artifacts["docs/需求文档.md"],
+                    "content": prepared_artifacts[DOC_REQUIREMENT_CONFIRM],
                     "instructions": "debug requirement confirm",
                     "actions": ["approve", "edit", "rerun_with_input"],
                 }
@@ -205,10 +207,10 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                 self._print_step(
                     "STEP 3: runtime input snapshot",
                     "传给 runtime 的 snapshot.artifacts 和 interrupt_payload.content 都应该是新需求文档。",
-                    snapshot_requirement_doc=snapshot["artifacts"]["docs/需求文档.md"],
+                    snapshot_requirement_doc=snapshot["artifacts"][DOC_REQUIREMENT_CONFIRM],
                     interrupt_content=interrupt_payload["content"],
                     snapshot_matches_interrupt=(
-                        snapshot["artifacts"]["docs/需求文档.md"] == interrupt_payload["content"]
+                        snapshot["artifacts"][DOC_REQUIREMENT_CONFIRM] == interrupt_payload["content"]
                     ),
                 )
 
@@ -218,15 +220,15 @@ class RequirementConfirmDebugTest(unittest.TestCase):
 
                 # persisted_doc: 最终磁盘文件正文
                 # persisted_state: latest_state.json 持久化后的状态
-                persisted_doc = (docs_dir / "需求文档.md").read_text(encoding="utf-8")
+                persisted_doc = requirement_doc_path.read_text(encoding="utf-8")
                 persisted_state = json.loads(
                     ((runtime_root / state["thread_id"]) / "latest_state.json").read_text(encoding="utf-8")
                 )
                 self._print_step(
                     "STEP 4: persisted outputs",
-                    "磁盘 docs/需求文档.md 保持新文档；latest_state.json 的 artifacts 记录的是磁盘路径，不是正文。",
+                    "磁盘需求解析确认文档保持新文档；latest_state.json 的 artifacts 记录的是磁盘路径，不是正文。",
                     persisted_requirement_doc=persisted_doc,
-                    persisted_artifact_path=persisted_state["artifacts"]["docs/需求文档.md"],
+                    persisted_artifact_path=persisted_state["artifacts"][DOC_REQUIREMENT_CONFIRM],
                     persisted_doc_matches_fake=(persisted_doc == fake_requirement_doc.rstrip() + "\n"),
                 )
 
@@ -237,8 +239,8 @@ class RequirementConfirmDebugTest(unittest.TestCase):
                 # - interrupt_payload["content"]
                 self.assertEqual(persisted_doc, fake_requirement_doc.rstrip() + "\n")
                 self.assertEqual(
-                    persisted_state["artifacts"]["docs/需求文档.md"],
-                    str((docs_dir / "需求文档.md").resolve()),
+                    persisted_state["artifacts"][DOC_REQUIREMENT_CONFIRM],
+                    str(requirement_doc_path.resolve()),
                 )
 
 

@@ -2,14 +2,12 @@ import { createServer } from "node:http";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { config } from "./env.js";
 import { sendTextMessage } from "./feishu.js";
-import { parseCommand, runWorkflow } from "./workflows.js";
+import { parseCommand, runCommand } from "./commands.js";
 
 installTimestampedLogging();
 
 const seenEventIds = new Map();
 const seenEventTtlMs = 10 * 60 * 1000;
-const chatQueues = new Map();
-const chatPendingCounts = new Map();
 
 const server = createServer((request, response) => {
   if (request.method === "GET" && request.url === "/health") {
@@ -20,7 +18,7 @@ const server = createServer((request, response) => {
 });
 
 server.listen(config.port, config.host, () => {
-  console.log(`Feishu Codex Bridge listening on http://${config.host}:${config.port}`);
+  console.log(`Feishu Message Bridge listening on http://${config.host}:${config.port}`);
   console.log("Feishu event mode: long connection");
 });
 
@@ -113,39 +111,13 @@ async function handleMessageEvent(event) {
     messageId: event.messageId || "[missing]"
   });
 
-  const pendingCount = chatPendingCounts.get(chatId) || 0;
-  chatPendingCounts.set(chatId, pendingCount + 1);
-  if (pendingCount > 0) {
-    await sendReplyMessage(event, `Queued ${command.name}. ${pendingCount} request(s) ahead.`).catch(console.error);
+  try {
+    const result = await runCommand(command, event);
+    await sendReplyMessage(event, result);
+  } catch (error) {
+    console.error(error);
+    await sendReplyMessage(event, `Command failed:\n${error.message}`).catch(console.error);
   }
-
-  const previous = chatQueues.get(chatId) || Promise.resolve();
-  const current = previous
-    .catch(() => {})
-    .then(async () => {
-      try {
-        await sendReplyMessage(event, `Received ${command.name}. Working...`);
-        const result = await runWorkflow(command, event);
-        await sendReplyMessage(event, result);
-      } catch (error) {
-        console.error(error);
-        await sendReplyMessage(event, `Workflow failed:\n${error.message}`).catch(console.error);
-      } finally {
-        const remaining = (chatPendingCounts.get(chatId) || 1) - 1;
-        if (remaining > 0) {
-          chatPendingCounts.set(chatId, remaining);
-        } else {
-          chatPendingCounts.delete(chatId);
-        }
-      }
-    });
-
-  chatQueues.set(chatId, current);
-  current.finally(() => {
-    if (chatQueues.get(chatId) === current) {
-      chatQueues.delete(chatId);
-    }
-  });
 }
 
 function parseFeishuMessageEvent(body) {
